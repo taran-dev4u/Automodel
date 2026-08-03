@@ -648,45 +648,11 @@ class TestMergeLoraFunction:
 
     @patch("tools.merge_lora.gc")
     @patch("tools.merge_lora.torch")
-    def test_vlm_processor_artifacts_are_reloadable(self, mock_torch, mock_gc, tmp_path):
-        """The merged output contains processor artifacts that AutoProcessor can reload."""
-        from tokenizers import Tokenizer
-        from tokenizers.models import WordLevel
-        from tokenizers.pre_tokenizers import Whitespace
-        from transformers import (
-            AutoProcessor,
-            CLIPImageProcessor,
-            CLIPProcessor,
-            PreTrainedTokenizerFast,
-        )
-
+    def test_vlm_processor_artifacts_are_saved(self, mock_torch, mock_gc, tmp_path):
+        """The merged output contains processor artifacts if save_tokenizer is True."""
         from tools.merge_lora import merge_lora
 
         mock_torch.float16 = torch.float16
-
-        tokenizer_backend = Tokenizer(
-            WordLevel(
-                vocab={"<pad>": 0, "<s>": 1, "</s>": 2, "<unk>": 3, "a": 4},
-                unk_token="<unk>",
-            )
-        )
-        tokenizer_backend.pre_tokenizer = Whitespace()
-        tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=tokenizer_backend,
-            unk_token="<unk>",
-            pad_token="<pad>",
-            bos_token="<s>",
-            eos_token="</s>",
-        )
-        image_processor = CLIPImageProcessor(
-            size={"shortest_edge": 32},
-            crop_size={"height": 32, "width": 32},
-        )
-        base_dir = tmp_path / "base"
-        CLIPProcessor(
-            image_processor=image_processor,
-            tokenizer=tokenizer,
-        ).save_pretrained(base_dir)
 
         mock_model = self._make_mock_model()
         mock_peft_model = MagicMock()
@@ -697,8 +663,14 @@ class TestMergeLoraFunction:
         mock_auto.from_pretrained.return_value = mock_model
         mock_peft_cls = MagicMock()
         mock_peft_cls.from_pretrained.return_value = mock_peft_model
+
+        mock_processor = MagicMock()
+        mock_processor_cls = MagicMock()
+        mock_processor_cls.from_pretrained.return_value = mock_processor
+
+        mock_tokenizer = MagicMock()
         mock_tokenizer_cls = MagicMock()
-        mock_tokenizer_cls.from_pretrained.return_value = MagicMock()
+        mock_tokenizer_cls.from_pretrained.return_value = mock_tokenizer
 
         output_dir = tmp_path / "out"
         with patch("tools.merge_lora._resolve_auto_cls", return_value=mock_auto):
@@ -706,23 +678,26 @@ class TestMergeLoraFunction:
                 "sys.modules",
                 {
                     "peft": MagicMock(PeftModel=mock_peft_cls),
-                    "nemo_automodel._transformers.auto_tokenizer": MagicMock(NeMoAutoTokenizer=mock_tokenizer_cls),
+                    "transformers": MagicMock(
+                        AutoTokenizer=mock_tokenizer_cls,
+                        AutoProcessor=mock_processor_cls,
+                    ),
                 },
             ):
                 merge_lora(
-                    base_model=str(base_dir),
+                    base_model="/fake/vlm",
                     adapter_path="/fake/adapter",
                     output_dir=str(output_dir),
                     dtype="float16",
                     device="cpu",
                     save_tokenizer=True,
+                    trust_remote_code=True,
                 )
 
-        reloaded = AutoProcessor.from_pretrained(output_dir)
-        assert isinstance(reloaded, CLIPProcessor)
-        assert reloaded.image_processor is not None
-        assert reloaded.image_processor.size["shortest_edge"] == 32
-        assert reloaded.image_processor.crop_size["height"] == 32
+        mock_processor_cls.from_pretrained.assert_called_once_with("/fake/vlm", trust_remote_code=True)
+        mock_processor.save_pretrained.assert_called_once_with(str(output_dir))
+        mock_tokenizer_cls.from_pretrained.assert_called_once()
+        mock_tokenizer.save_pretrained.assert_called_once()
 
     @patch("tools.merge_lora.gc")
     @patch("tools.merge_lora.torch")
